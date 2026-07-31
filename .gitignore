@@ -1,0 +1,44 @@
+# Gradle & Build Artifacts
+*.iml
+.gradle
+.kotlin
+/build
+/captures
+.externalNativeBuild
+.cxx
+/.build-outputs
+*.apk
+*.aab
+
+# IDE & OS Configuration
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
+
+# Local Properties
+/local.properties
+local.properties
+
+# Secrets & Environment Variables
+.env
+.env.*
+!.env.example
+!app/.env.example
+*.keystore
+*.jks
+debug.keystore
+debug.keystore.base64
+google-services.json
+
+# User Data, Exports & Database Files
+*.db
+*.sqlite
+*.db-journal
+*.db-shm
+*.db-wal
+youji_backup_*.json
+youji_export_*.json
+/exports/
+
+

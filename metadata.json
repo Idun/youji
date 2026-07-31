@@ -1,0 +1,6 @@
+{
+  "name": "由记",
+  "description": "一款优雅而纯粹的灵感记录与 Markdown 渲染工具，在这里沉淀你的想法与创意。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
