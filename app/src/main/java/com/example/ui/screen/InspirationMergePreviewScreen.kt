@@ -134,6 +134,11 @@ fun InspirationMergePreviewScreen(
     }
     val sharedPrefs = remember { context.getSharedPreferences("merge_draft_prefs", Context.MODE_PRIVATE) }
 
+    // Auto-save states for Room DB
+    var currentMergeId by remember { mutableStateOf(0) }
+    var autoSaveStatus by remember { mutableStateOf("") }
+    var isMergeLoaded by remember { mutableStateOf(false) }
+
     // Editing states
     var jointContent by remember { mutableStateOf(androidx.compose.ui.text.input.TextFieldValue("")) }
     var jointTitle by remember { mutableStateOf("") }
@@ -143,10 +148,12 @@ fun InspirationMergePreviewScreen(
     // Undo / Redo history stack
     val historyStack = remember { mutableStateListOf<MergeState>() }
     var historyIndex by remember { mutableStateOf(-1) }
+    var isUndoRedoAction by remember { mutableStateOf(false) }
 
     fun pushHistory(newState: MergeState) {
-        if (historyIndex >= 0 && historyStack[historyIndex] == newState) return
-        while (historyStack.size > historyIndex + 1) {
+        if (isUndoRedoAction) return
+        if (historyIndex >= 0 && historyIndex < historyStack.size && historyStack[historyIndex] == newState) return
+        while (historyStack.size > historyIndex + 1 && historyStack.isNotEmpty()) {
             historyStack.removeAt(historyStack.lastIndex)
         }
         historyStack.add(newState)
@@ -228,6 +235,78 @@ fun InspirationMergePreviewScreen(
                 pushHistory(MergeState(jointTitle, jointCategory, blocksStr, jointTag))
             } else {
                 updateState(title = "", category = "", tag = "", content = androidx.compose.ui.text.input.TextFieldValue(""))
+            }
+        }
+        isMergeLoaded = true
+    }
+
+    // Auto save to Room DB with debounce (1 second delay)
+    LaunchedEffect(jointTitle, jointContent.text, jointTag, jointCategory, isMergeLoaded) {
+        if (!isMergeLoaded) return@LaunchedEffect
+        if (jointTitle.isNotBlank() || jointContent.text.isNotBlank() || currentMergeId > 0) {
+            kotlinx.coroutines.delay(1000L)
+            autoSaveStatus = "保存中..."
+            val finalTitle = jointTitle.trim().ifBlank { "未命名接合文档" }
+            val savedId = viewModel.saveInspiration(
+                title = finalTitle,
+                content = jointContent.text.trim(),
+                tag = jointTag,
+                category = jointCategory,
+                isPinned = false,
+                isArchived = false,
+                existingId = currentMergeId
+            )
+            if (savedId > 0) {
+                currentMergeId = savedId
+            }
+            autoSaveStatus = "已保存"
+            kotlinx.coroutines.delay(2000L)
+            if (autoSaveStatus == "已保存") {
+                autoSaveStatus = ""
+            }
+        }
+    }
+
+    // Lifecycle auto save when entering background or leaving screen
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_PAUSE || event == androidx.lifecycle.Lifecycle.Event.ON_STOP) {
+                if (isMergeLoaded && (jointTitle.isNotBlank() || jointContent.text.isNotBlank() || currentMergeId > 0)) {
+                    coroutineScope.launch {
+                        val finalTitle = jointTitle.trim().ifBlank { "未命名接合文档" }
+                        val savedId = viewModel.saveInspiration(
+                            title = finalTitle,
+                            content = jointContent.text.trim(),
+                            tag = jointTag,
+                            category = jointCategory,
+                            isPinned = false,
+                            isArchived = false,
+                            existingId = currentMergeId
+                        )
+                        if (savedId > 0) {
+                            currentMergeId = savedId
+                        }
+                    }
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            if (isMergeLoaded && (jointTitle.isNotBlank() || jointContent.text.isNotBlank() || currentMergeId > 0)) {
+                coroutineScope.launch {
+                    val finalTitle = jointTitle.trim().ifBlank { "未命名接合文档" }
+                    viewModel.saveInspiration(
+                        title = finalTitle,
+                        content = jointContent.text.trim(),
+                        tag = jointTag,
+                        category = jointCategory,
+                        isPinned = false,
+                        isArchived = false,
+                        existingId = currentMergeId
+                    )
+                }
             }
         }
     }
@@ -353,7 +432,22 @@ fun InspirationMergePreviewScreen(
             snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
         topBar = {
             TopAppBar(
-                title = { Text(if (isPureMergePreview) "合并预览" else "拼文", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)) },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = if (isPureMergePreview) "合并预览" else "拼文",
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                        )
+                        if (autoSaveStatus.isNotEmpty()) {
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = autoSaveStatus,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (autoSaveStatus == "保存中...") brandColor else Color.Gray
+                            )
+                        }
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = {
                         focusManager.clearFocus()
@@ -366,15 +460,17 @@ fun InspirationMergePreviewScreen(
                 actions = {
                     // Undo Button
                     IconButton(
-                        enabled = historyIndex > 0,
+                        enabled = historyIndex > 0 && historyIndex < historyStack.size,
                         onClick = {
-                            if (historyIndex > 0) {
+                            if (historyIndex > 0 && historyIndex < historyStack.size) {
+                                isUndoRedoAction = true
                                 historyIndex--
                                 val state = historyStack[historyIndex]
                                 jointTitle = state.title
                                 jointCategory = state.category
                                 jointTag = state.tag
                                 jointContent = androidx.compose.ui.text.input.TextFieldValue(state.content)
+                                isUndoRedoAction = false
                                 coroutineScope.launch {
                                     snackbarHostState.showSnackbar("已撤销最近一次的操作")
                                 }
@@ -384,21 +480,23 @@ fun InspirationMergePreviewScreen(
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.Undo,
                             contentDescription = "撤销",
-                            tint = if (historyIndex > 0) MaterialTheme.colorScheme.primary else Color.Gray
+                            tint = if (historyIndex > 0 && historyIndex < historyStack.size) MaterialTheme.colorScheme.primary else Color.Gray
                         )
                     }
 
                     // Redo Button
                     IconButton(
-                        enabled = historyIndex < historyStack.lastIndex,
+                        enabled = historyIndex >= 0 && historyIndex < historyStack.lastIndex,
                         onClick = {
-                            if (historyIndex < historyStack.lastIndex) {
+                            if (historyIndex >= 0 && historyIndex < historyStack.lastIndex) {
+                                isUndoRedoAction = true
                                 historyIndex++
                                 val state = historyStack[historyIndex]
                                 jointTitle = state.title
                                 jointCategory = state.category
                                 jointTag = state.tag
                                 jointContent = androidx.compose.ui.text.input.TextFieldValue(state.content)
+                                isUndoRedoAction = false
                                 coroutineScope.launch {
                                     snackbarHostState.showSnackbar("已重做最近一次的操作")
                                 }
@@ -408,7 +506,7 @@ fun InspirationMergePreviewScreen(
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.Redo,
                             contentDescription = "重做",
-                            tint = if (historyIndex < historyStack.lastIndex) MaterialTheme.colorScheme.primary else Color.Gray
+                            tint = if (historyIndex >= 0 && historyIndex < historyStack.lastIndex) MaterialTheme.colorScheme.primary else Color.Gray
                         )
                     }
 
@@ -666,44 +764,48 @@ fun InspirationMergePreviewScreen(
                         // 撤销与重做移到最左侧
                         IconButton(
                             onClick = {
-                                if (historyIndex > 0) {
+                                if (historyIndex > 0 && historyIndex < historyStack.size) {
+                                    isUndoRedoAction = true
                                     historyIndex--
                                     val state = historyStack[historyIndex]
                                     jointTitle = state.title
                                     jointCategory = state.category
                                     jointTag = state.tag
                                     jointContent = TextFieldValue(state.content, selection = TextRange(state.content.length))
+                                    isUndoRedoAction = false
                                 }
                             },
-                            enabled = historyIndex > 0,
+                            enabled = historyIndex > 0 && historyIndex < historyStack.size,
                             modifier = Modifier.size(36.dp)
                         ) {
                             Icon(
                                 Icons.AutoMirrored.Filled.Undo,
                                 contentDescription = "撤销",
-                                tint = if (historyIndex > 0) Color.Gray else Color.LightGray,
+                                tint = if (historyIndex > 0 && historyIndex < historyStack.size) Color.Gray else Color.LightGray,
                                 modifier = Modifier.size(20.dp)
                             )
                         }
 
                         IconButton(
                             onClick = {
-                                if (historyIndex < historyStack.lastIndex) {
+                                if (historyIndex >= 0 && historyIndex < historyStack.lastIndex) {
+                                    isUndoRedoAction = true
                                     historyIndex++
                                     val state = historyStack[historyIndex]
                                     jointTitle = state.title
                                     jointCategory = state.category
                                     jointTag = state.tag
                                     jointContent = TextFieldValue(state.content, selection = TextRange(state.content.length))
+                                    isUndoRedoAction = false
                                 }
                             },
-                            enabled = historyIndex < historyStack.lastIndex,
+                            enabled = historyIndex >= 0 && historyIndex < historyStack.lastIndex,
                             modifier = Modifier.size(36.dp)
                         ) {
                             Icon(
                                 Icons.AutoMirrored.Filled.Redo,
                                 contentDescription = "重做",
-                                tint = if (historyIndex < historyStack.lastIndex) Color.Gray else Color.LightGray,
+                                tint = if (historyIndex >= 0 && historyIndex < historyStack.lastIndex) Color.Gray else Color.LightGray,
                                 modifier = Modifier.size(20.dp)
                             )
                         }

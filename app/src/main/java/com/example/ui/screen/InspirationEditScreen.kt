@@ -62,6 +62,7 @@ import com.example.domain.model.Inspiration
 import com.example.ui.markdown.MarkdownRenderer
 import com.example.ui.viewmodel.InspirationViewModel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -134,6 +135,10 @@ fun InspirationEditScreen(
     var createdTimestamp by remember { mutableStateOf(System.currentTimeMillis()) }
     var sortOrder by remember { mutableStateOf(0L) }
 
+    var currentId by remember(inspirationId) { mutableStateOf(inspirationId) }
+    var autoSaveStatus by remember { mutableStateOf("") }
+    var isLoaded by remember { mutableStateOf(false) }
+
     val focusRequester = remember { FocusRequester() }
     val scope = rememberCoroutineScope()
     val keyboardController = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
@@ -146,22 +151,96 @@ fun InspirationEditScreen(
 
     LaunchedEffect(inspirationId) {
         if (inspirationId != 0) {
-            viewModel.getInspirationById(inspirationId).collect { inspiration ->
-                if (inspiration != null) {
-                    titleValue = TextFieldValue(inspiration.title)
-                    contentValue = TextFieldValue(inspiration.content)
-                    tag = inspiration.tag
-                    category = inspiration.category
-                    isPinned = inspiration.isPinned
-                    isArchived = inspiration.isArchived
-                    createdTimestamp = inspiration.timestamp
-                    sortOrder = inspiration.sortOrder
-                }
+            val inspiration = viewModel.getInspirationById(inspirationId).firstOrNull()
+            if (inspiration != null) {
+                titleValue = TextFieldValue(inspiration.title)
+                contentValue = TextFieldValue(inspiration.content)
+                tag = inspiration.tag
+                category = inspiration.category
+                isPinned = inspiration.isPinned
+                isArchived = inspiration.isArchived
+                createdTimestamp = inspiration.timestamp
+                sortOrder = inspiration.sortOrder
             }
         } else {
             val currentGroup = viewModel.selectedGroup.value
             if (currentGroup != "全部笔记" && currentGroup != "未分类") {
                 category = currentGroup
+            }
+        }
+        isLoaded = true
+    }
+
+    // Auto save with debounce (1 second delay)
+    LaunchedEffect(titleValue.text, contentValue.text, tag, category, isPinned, isArchived, isLoaded) {
+        if (!isLoaded) return@LaunchedEffect
+        if (titleValue.text.isNotBlank() || contentValue.text.isNotBlank() || currentId > 0) {
+            delay(1000L)
+            autoSaveStatus = "保存中..."
+            val savedId = viewModel.saveInspiration(
+                title = titleValue.text,
+                content = contentValue.text,
+                tag = tag,
+                category = category,
+                isPinned = isPinned,
+                isArchived = isArchived,
+                existingId = currentId,
+                sortOrder = sortOrder,
+                createdTimestamp = createdTimestamp
+            )
+            if (savedId > 0) {
+                currentId = savedId
+            }
+            autoSaveStatus = "已保存"
+            delay(2000L)
+            if (autoSaveStatus == "已保存") {
+                autoSaveStatus = ""
+            }
+        }
+    }
+
+    // Save automatically when entering background or leaving screen
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_PAUSE || event == androidx.lifecycle.Lifecycle.Event.ON_STOP) {
+                if (isLoaded && (titleValue.text.isNotBlank() || contentValue.text.isNotBlank() || currentId > 0)) {
+                    scope.launch {
+                        val savedId = viewModel.saveInspiration(
+                            title = titleValue.text,
+                            content = contentValue.text,
+                            tag = tag,
+                            category = category,
+                            isPinned = isPinned,
+                            isArchived = isArchived,
+                            existingId = currentId,
+                            sortOrder = sortOrder,
+                            createdTimestamp = createdTimestamp
+                        )
+                        if (savedId > 0) {
+                            currentId = savedId
+                        }
+                    }
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            if (isLoaded && (titleValue.text.isNotBlank() || contentValue.text.isNotBlank() || currentId > 0)) {
+                scope.launch {
+                    viewModel.saveInspiration(
+                        title = titleValue.text,
+                        content = contentValue.text,
+                        tag = tag,
+                        category = category,
+                        isPinned = isPinned,
+                        isArchived = isArchived,
+                        existingId = currentId,
+                        sortOrder = sortOrder,
+                        createdTimestamp = createdTimestamp
+                    )
+                }
             }
         }
     }
@@ -189,8 +268,14 @@ fun InspirationEditScreen(
     val redoStack = remember { mutableStateListOf<TextFieldValue>() }
 
     var lastValue by remember { mutableStateOf(contentValue) }
+    var isUndoRedoAction by remember { mutableStateOf(false) }
 
     LaunchedEffect(contentValue) {
+        if (isUndoRedoAction) {
+            isUndoRedoAction = false
+            lastValue = contentValue
+            return@LaunchedEffect
+        }
         if (contentValue.text != lastValue.text) {
             if (undoStack.isEmpty() || undoStack.last().text != lastValue.text) {
                 undoStack.add(lastValue)
@@ -205,17 +290,22 @@ fun InspirationEditScreen(
 
     val onSave = {
         scope.launch {
-            viewModel.saveInspiration(
-                title = titleValue.text,
-                content = contentValue.text,
-                tag = tag,
-                category = category,
-                isPinned = isPinned,
-                isArchived = isArchived,
-                existingId = inspirationId,
-                sortOrder = sortOrder,
-                createdTimestamp = createdTimestamp
-            )
+            if (titleValue.text.isNotBlank() || contentValue.text.isNotBlank() || currentId > 0) {
+                val savedId = viewModel.saveInspiration(
+                    title = titleValue.text,
+                    content = contentValue.text,
+                    tag = tag,
+                    category = category,
+                    isPinned = isPinned,
+                    isArchived = isArchived,
+                    existingId = currentId,
+                    sortOrder = sortOrder,
+                    createdTimestamp = createdTimestamp
+                )
+                if (savedId > 0) {
+                    currentId = savedId
+                }
+            }
         }
     }
 
@@ -228,8 +318,6 @@ fun InspirationEditScreen(
 
     var showTagManagerDialog by remember { mutableStateOf(false) }
     var showExportSheet by remember { mutableStateOf(false) }
-
-
 
     var textToolbarRect by remember { mutableStateOf<Rect?>(null) }
     var onCopyMenu: (() -> Unit)? by remember { mutableStateOf(null) }
@@ -263,11 +351,21 @@ fun InspirationEditScreen(
             topBar = {
                 TopAppBar(
                     title = {
-                        Text(
-                            text = if (inspirationId == 0) "新灵感" else "编辑灵感",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = if (currentId == 0) "新灵感" else "编辑灵感",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            if (autoSaveStatus.isNotEmpty()) {
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = autoSaveStatus,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (autoSaveStatus == "保存中...") brandColor else Color.Gray
+                                )
+                            }
+                        }
                     },
                     navigationIcon = {
                         IconButton(onClick = {
@@ -463,11 +561,12 @@ fun InspirationEditScreen(
                         IconButton(
                             onClick = {
                                 if (undoStack.isNotEmpty()) {
+                                    isUndoRedoAction = true
                                     val currentState = contentValue
                                     redoStack.add(currentState)
-                                    val prevState = undoStack.removeLast()
-                                    contentValue = prevState
+                                    val prevState = undoStack.removeAt(undoStack.lastIndex)
                                     lastValue = prevState
+                                    contentValue = prevState
                                 }
                             },
                             enabled = undoStack.isNotEmpty(),
@@ -484,11 +583,12 @@ fun InspirationEditScreen(
                         IconButton(
                             onClick = {
                                 if (redoStack.isNotEmpty()) {
+                                    isUndoRedoAction = true
                                     val currentState = contentValue
                                     undoStack.add(currentState)
-                                    val nextState = redoStack.removeLast()
-                                    contentValue = nextState
+                                    val nextState = redoStack.removeAt(redoStack.lastIndex)
                                     lastValue = nextState
+                                    contentValue = nextState
                                 }
                             },
                             enabled = redoStack.isNotEmpty(),
